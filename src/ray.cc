@@ -3,13 +3,17 @@
 #include <iostream>
 
 #include <vector>
+#include <string>
 #include <iterator>
+#include <fstream>
 
 #include <QImage>
 
 #include <CGAL/Cartesian.h>
 #include <CGAL/Origin.h>
 #include <CGAL/Sphere_3.h>
+#include <CGAL/Polyhedron_3.h>
+#include <CGAL/IO/Polyhedron_iostream.h>
 #include <CGAL/Spherical_kernel_3.h>
 #include <CGAL/Exact_spherical_kernel_3.h>
 #include <CGAL/Algebraic_kernel_for_spheres_2_3.h>
@@ -22,8 +26,11 @@ using CGAL::Ray_3;
 using CGAL::Point_2;
 using CGAL::Point_3;
 using CGAL::Vector_3;
+using CGAL::Triangle_3;
 using CGAL::Line_3;
+using CGAL::Segment_3;
 using CGAL::Sphere_3;
+using CGAL::Polyhedron_3;
 using CGAL::Plane_3;
 using CGAL::to_double;
 
@@ -55,6 +62,8 @@ struct Scene
     SunLight light;
 };
 
+typedef std::list< CGAL::Triangle_3<K> > TIN;
+
 class ProjectionScreen
 {
 protected:
@@ -85,6 +94,7 @@ public:
     {
 	Sphere_3<K> sp;
 	Plane_3<K> pl;
+	TIN tin;
 	bool intersects = false;
 
 	// intersection with a sphere
@@ -143,13 +153,36 @@ public:
 		normal = normal / sqrt(normal.squared_length());
 	    }
 	}
+	// intersection with a mesh
+	else if ( assign (tin, obj) )
+	{
+	    for ( TIN::const_iterator it = tin.begin(); it != tin.end(); it++ )
+	    {
+		Point_3<K> p;
+		Segment_3<K> seg;
+
+		CGAL::Object iobj = intersection( ray, *it );
+		if ( assign( p, iobj ) )
+		{
+		    intersects = true;
+		    normal = it->supporting_plane().orthogonal_vector();
+		    normal = normal / sqrt( normal.squared_length() );
+		}
+		else if ( assign ( seg, iobj ) )
+		{
+		    // we have a colinear segment with our ray, return the closer point to the ray source
+		    // TODO
+		    intersects = false;
+		}
+	    }
+	}
 	return intersects;
     }
 
     void compute_color( const Scene& scene, const Ray_3<K>& ray, uchar& red, uchar& green, uchar& blue )
     {
 	static int recurse_level = 0;
-	if (recurse_level > 10)
+	if (recurse_level > 3)
 	{
 	    return;
 	}
@@ -268,6 +301,23 @@ protected:
 
 int main( int argc, char *argv[] )
 {
+    // 256 x 256
+    size_t resolution = 256;
+    if ( argc > 1 )
+    {
+	for ( int i = 1; i < argc; i++ )
+	{
+	    string arg = argv[i];
+	    // resolution
+	    if ( arg == "-r" )
+	    {
+		if ( argc > i + 1 )
+		{
+		    sscanf( argv[++i], "%lu", &resolution );
+		}
+	    }
+	}
+    }
     Sphere_3<K> sp( ORIGIN, 3 );
 
     Point_2<K> camera_ul( -2.0, 2.0 );
@@ -275,32 +325,32 @@ int main( int argc, char *argv[] )
 
     Scene scene;
     SceneObject obj;
-    obj.object = make_object(Sphere_3<K>(Point_3<K>( 0.0, -0.2, 0.0 ), 0.5));
-    obj.color.r = 255;
-    obj.color.g = 255;
-    obj.color.b = 255;
-    obj.is_reflective = true;
-    scene.objects.push_back( obj );
+    // obj.object = make_object(Sphere_3<K>(Point_3<K>( 0.0, -0.2, 0.0 ), 0.5));
+    // obj.color.r = 255;
+    // obj.color.g = 255;
+    // obj.color.b = 255;
+    // obj.is_reflective = true;
+    // scene.objects.push_back( obj );
     
     obj.object = make_object(Sphere_3<K>(ORIGIN + Vector_3<K>( 1.0, 0.5, -0.4 ), 0.2 ));
     obj.color.r = 255;
     obj.color.g = 0;
     obj.color.b = 0;
-    obj.is_reflective = true;
+    obj.is_reflective = false;
     scene.objects.push_back( obj );
     
     obj.object = make_object(Sphere_3<K>(Point_3<K>( -1.0, 0.8, 0.3 ), 0.2 ));
     obj.color.r = 0;
     obj.color.g = 120;
     obj.color.b = 255;
-    obj.is_reflective = true;
+    obj.is_reflective = false;
     scene.objects.push_back( obj );
     
     obj.object = make_object(Sphere_3<K>(Point_3<K>( 0.0, 1.2, 0.1 ), 0.3 ));
     obj.color.r = 0;
     obj.color.g = 120;
     obj.color.b = 255;
-    obj.is_reflective = true;
+    obj.is_reflective = false;
     scene.objects.push_back( obj );
     
     // obj.object = make_object(Plane_3<K>(Point_3<K>( 0.0, -0.5, 0.0) , Vector_3<K>( 0.0, 1.0, -0.5 )));
@@ -309,9 +359,48 @@ int main( int argc, char *argv[] )
     // obj.color.b = 255;
     // scene.objects.push_back( obj );
     
+    // TIN loading
+    TIN tin;
+    {
+	ifstream data_file( "../data/m0.off" );
+	Polyhedron_3<K> poly;
+	data_file >> poly;
+	
+	// Convert facet to list of Triangle_3
+	Polyhedron_3<K>::Facet_iterator it;
+	for ( it = poly.facets_begin(); it != poly.facets_end(); it++ )
+	{
+	    assert( it->size() == 3 );
+	    Point_3<K> tri[3];
+	    Polyhedron_3<K>::Halfedge_around_facet_circulator eit;
+	    size_t s = 0;
+	    for ( eit = it->facet_begin(); s < circulator_size( eit ); s++, eit++ )
+	    {
+		Point_3<K> p = eit->vertex()->point();
+		tri[s] = Point_3<K>( p.x() * 3 - 1.5, p.y() * 3 - 1.5, p.z() * 3 - 1.5);
+	    }
+	    
+	    Triangle_3<K> triangle( tri[0], tri[1], tri[2] );
+	    if ( triangle.is_degenerate() )
+	    {
+		cout << triangle << endl;
+		cout << "DEGENERATED triangle !" << endl;
+		continue;
+	    }
+	    tin.push_back( triangle );
+	}
+
+	obj.object = make_object( tin );
+	obj.color.r = 255;
+	obj.color.g = 255;
+	obj.color.b = 255;
+	obj.is_reflective = true;
+	scene.objects.push_back( obj );
+    }
+
     scene.light.location = Point_3<K>( -0.5, 1.0, -1.5 );
     
-    ProjectionScreen pscreen( camera_ul, camera_lr, -5.0, 256, 256 );
+    ProjectionScreen pscreen( camera_ul, camera_lr, -5.0, resolution, resolution );
     pscreen.set_ambient( 0.05 );
     pscreen.render( scene, "out.png" );
     return 0;
